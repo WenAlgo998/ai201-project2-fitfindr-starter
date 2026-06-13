@@ -18,7 +18,54 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract a search description, an optional size, and an optional max_price
+    from a natural-language query using regex (no LLM — keeps parsing
+    deterministic, per the planning.md choice).
+
+    Returns a dict: {"description": str, "size": str | None, "max_price": float | None}
+    """
+    text = query.strip()
+
+    # max_price — "under $30", "below 30", "$30", "30 dollars", "max 25"
+    max_price = None
+    price_match = re.search(
+        r"(?:under|below|less than|max|<|\$)\s*\$?\s*(\d+(?:\.\d+)?)", text, re.I
+    )
+    if not price_match:
+        price_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:dollars|bucks)\b", text, re.I)
+    if price_match:
+        max_price = float(price_match.group(1))
+
+    # size — only the explicit "size X" form, to avoid false positives from
+    # stray letters elsewhere in the query.
+    size = None
+    size_match = re.search(r"\bsize\s+([a-z0-9][a-z0-9./]*)", text, re.I)
+    if size_match:
+        size = size_match.group(1).upper().rstrip(".,")
+
+    # description — the query with the recognized price/size phrases stripped out.
+    description = text
+    description = re.sub(
+        r"(?:under|below|less than|max)\s*\$?\s*\d+(?:\.\d+)?(?:\s*(?:dollars|bucks))?",
+        " ", description, flags=re.I,
+    )
+    description = re.sub(r"\$\s*\d+(?:\.\d+)?", " ", description)
+    description = re.sub(r"\d+(?:\.\d+)?\s*(?:dollars|bucks)", " ", description, flags=re.I)
+    description = re.sub(r"\bin\s+size\s+[a-z0-9./]+", " ", description, flags=re.I)
+    description = re.sub(r"\bsize\s+[a-z0-9./]+", " ", description, flags=re.I)
+    description = re.sub(r"[,;]", " ", description)
+    description = re.sub(r"\s+", " ", description).strip()
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +139,59 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: initialize session state.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the query into search parameters.
+    session["parsed"] = _parse_query(query)
+    parsed = session["parsed"]
+
+    # Step 3: search. (Branch A — stop early if nothing matches.)
+    session["search_results"] = search_listings(
+        parsed["description"], size=parsed["size"], max_price=parsed["max_price"]
+    )
+    if not session["search_results"]:
+        bits = []
+        if parsed["max_price"] is not None:
+            bits.append(f"under ${parsed['max_price']:.0f}")
+        if parsed["size"]:
+            bits.append(f"in size {parsed['size']}")
+        constraints = (" " + " ".join(bits)) if bits else ""
+        session["error"] = (
+            f"I couldn't find any \"{parsed['description']}\"{constraints} right now. "
+            "Try raising your budget, removing the size filter, or using "
+            "different keywords."
+        )
+        return session  # do NOT call suggest_outfit / create_fit_card
+
+    # Step 4: select the top (most relevant) result.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: suggest an outfit. (Branch B — stop on LLM failure.)
+    try:
+        session["outfit_suggestion"] = suggest_outfit(
+            session["selected_item"], session["wardrobe"]
+        )
+    except Exception:
+        session["error"] = (
+            "Styling service is temporarily unavailable — please try again "
+            "in a moment."
+        )
+        return session
+
+    # Step 6: create the fit card. (Branch C — stop on LLM failure.)
+    try:
+        session["fit_card"] = create_fit_card(
+            session["outfit_suggestion"], session["selected_item"]
+        )
+    except Exception:
+        session["error"] = (
+            "Couldn't generate a fit card just now — please try again "
+            "in a moment."
+        )
+        return session
+
+    # Step 7: done — error stays None.
     return session
 
 
