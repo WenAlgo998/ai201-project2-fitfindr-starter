@@ -17,8 +17,9 @@ import os
 
 import pytest
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe, load_listings
+from agent import _search_with_fallback
 
 needs_groq = pytest.mark.skipif(
     not os.environ.get("GROQ_API_KEY"),
@@ -115,3 +116,56 @@ def test_fit_card_varies_on_repeat():
     a = create_fit_card(outfit, item)
     b = create_fit_card(outfit, item)
     assert a != b
+
+
+# ── Stretch: compare_price (pure Python) ────────────────────────────────────────
+
+def test_compare_price_returns_reasoned_string():
+    item = load_listings()[0]
+    result = compare_price(item)
+    assert isinstance(result, str)
+    # Mentions the price and references comparable items (reasoning).
+    assert "$" in result
+    assert "comparable" in result.lower() or "compare" in result.lower()
+
+
+def test_compare_price_verdict_matches_relative_price():
+    listings = load_listings()
+    tops = [l for l in listings if l["category"] == "tops"]
+    cheapest = min(tops, key=lambda l: l["price"])
+    priciest = max(tops, key=lambda l: l["price"])
+    assert "great deal" in compare_price(cheapest).lower()
+    assert "a bit high" in compare_price(priciest).lower()
+
+
+# ── Stretch: retry-with-fallback search (pure Python) ───────────────────────────
+
+def test_fallback_loosens_price_when_too_low():
+    # Tees exist, but none under $5 — fallback should drop the price limit.
+    parsed = {"description": "vintage graphic tee", "size": None, "max_price": 5.0}
+    results, note = _search_with_fallback(parsed)
+    assert len(results) > 0
+    assert note is not None and "loosened" in note.lower()
+
+
+def test_fallback_drops_size_when_unmatched():
+    # Band tees are size L; size XS won't match — fallback should drop size.
+    parsed = {"description": "band tee", "size": "XS", "max_price": None}
+    results, note = _search_with_fallback(parsed)
+    assert len(results) > 0
+    assert note is not None and "size" in note.lower()
+
+
+def test_fallback_no_note_when_first_search_succeeds():
+    parsed = {"description": "vintage tee", "size": None, "max_price": None}
+    results, note = _search_with_fallback(parsed)
+    assert len(results) > 0
+    assert note is None
+
+
+def test_fallback_total_failure_returns_empty():
+    # No "designer ballgown" exists at any price/size.
+    parsed = {"description": "designer ballgown", "size": "XXS", "max_price": 5.0}
+    results, note = _search_with_fallback(parsed)
+    assert results == []
+    assert note is None

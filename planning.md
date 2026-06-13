@@ -66,7 +66,22 @@ If `outfit` is empty or whitespace-only, it returns a descriptive error-message 
 
 ### Additional Tools (if any)
 
-None for the core build — the three required tools cover the full find → style → share flow. A possible stretch addition is a price-comparison tool (`assess_price(new_item)` returning a "deal / fair / overpriced" verdict with reasoning drawn from comparable listings in the dataset), noted here but not part of the core design.
+The three required tools cover the core find → style → share flow. Two stretch
+features were added afterward (see README → Stretch Features for full detail):
+
+**`compare_price(new_item) -> str`** *(stretch tool)*
+- **What it does:** assesses whether the selected listing is well-priced vs.
+  comparable items. Pure Python, no LLM.
+- **Input:** `new_item` (dict) — the listing being assessed.
+- **Returns:** a one-line verdict string ("a great deal" / "fairly priced" / "a
+  bit high") with the supporting price range + median of same-category listings.
+- **On failure:** if no comparable listings exist, returns a clear message
+  rather than raising.
+
+**Retry-with-fallback** *(stretch behavior in the planning loop, not a tool)*
+- `_search_with_fallback` in `agent.py` re-runs `search_listings` with loosened
+  constraints (drop size, then price) when the first search is empty, recording
+  what it relaxed in `session["retry_note"]`.
 
 ---
 

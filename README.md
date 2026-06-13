@@ -103,6 +103,19 @@ Groq LLM at a higher temperature (1.1) so repeated captions vary.
 platform once each. If `outfit` is empty/whitespace it returns a descriptive
 error-message string instead of raising.
 
+### 4. `compare_price(new_item) -> str`  *(stretch)*
+
+**Purpose:** assess whether the selected listing is well-priced. Pure Python —
+see [Stretch Features](#stretch-features).
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `new_item` | `dict` | the listing dict being assessed. |
+
+**Returns:** a one-line `str` verdict with reasoning, e.g. *"At $18, this is a
+great deal — comparable tops listings range $15–$35 (median ~$22, across 14
+similar items)."*
+
 ---
 
 ## Planning Loop
@@ -115,12 +128,16 @@ each step's output. It does **not** call all three tools unconditionally.
 1. **Initialize** the session (`_new_session`).
 2. **Parse** the query into `description`, `size`, `max_price` (regex — see
    State Management). Store in `session["parsed"]`.
-3. **Search:** call `search_listings(**parsed)`.
-   - **Decision (Branch A):** `if not search_results:` → write a specific,
-     actionable message to `session["error"]` and **return early**.
-     `suggest_outfit` and `create_fit_card` are never called.
-   - else → continue.
-4. **Select** `session["selected_item"] = search_results[0]`.
+3. **Search:** call `search_listings(**parsed)` via `_search_with_fallback`,
+   which auto-retries on loosened constraints (see [Stretch
+   Features](#stretch-features)).
+   - **Decision (Branch A):** `if not search_results:` (even after loosening) →
+     write a specific, actionable message to `session["error"]` and **return
+     early**. `suggest_outfit` and `create_fit_card` are never called.
+   - else → continue. If a retry was needed, `session["retry_note"]` records
+     what was relaxed.
+4. **Select** `session["selected_item"] = search_results[0]`, then assess its
+   price with `compare_price` → `session["price_assessment"]`.
 5. **Suggest outfit** (wrapped in try/except). An empty wardrobe is *not* an
    error — the tool returns general advice — so the loop proceeds. On an LLM
    exception (**Branch B**) it sets `error` and returns.
@@ -221,6 +238,52 @@ I kept this behavior (surfacing the nearest match) rather than tightening the
 scoring, because for a shopping assistant a near match is more useful than an
 empty result — but it's a real gap between the planned example and actual
 output, and a fuzzier/weighted scorer would be the next improvement.
+
+---
+
+## Stretch Features
+
+### Price Comparison Tool (`compare_price`)
+
+After the agent selects a listing, it calls `compare_price(selected_item)` and
+stores the result in `session["price_assessment"]`, shown under the listing
+panel with a 💰 marker.
+
+**How the comparison is made:** it loads all listings, takes every *other* item
+in the **same category** as the selected one, and computes their price range and
+median. The selected item's price is then judged against that median: at or
+below 85% → "a great deal", within ±15% → "fairly priced", above 115% → "a bit
+high". The returned string includes the numbers behind the verdict, e.g.:
+
+```
+At $18, this is a great deal — comparable tops listings range $15–$35
+(median ~$22, across 14 similar items).
+```
+
+It's pure Python (no LLM), so the assessment is deterministic and explainable.
+
+### Retry Logic with Fallback (`_search_with_fallback`)
+
+When the initial `search_listings` returns nothing, the agent doesn't just give
+up — it automatically retries with loosened constraints, in order:
+
+1. full constraints (description + size + price);
+2. if empty and a size was given → retry **without the size filter**;
+3. if still empty and a price was given → retry **without the price limit**.
+
+If a loosened retry succeeds, the agent proceeds normally but records exactly
+what it relaxed in `session["retry_note"]`, surfaced to the user with an ℹ️
+marker. Example — *"vintage graphic tee under $5"* (no tee is that cheap):
+
+```
+ℹ️ No "vintage graphic tee" under $5 — I loosened the price limit and found
+   these instead.
+```
+
+Only if *every* loosened attempt also comes back empty (e.g. "designer ballgown",
+which matches no keywords at any price/size) does the agent fall through to the
+Branch A error message. This makes the empty-result path adaptive: a near-miss
+on price or size still produces a useful result instead of a dead end.
 
 ---
 

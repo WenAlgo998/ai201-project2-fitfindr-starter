@@ -20,7 +20,7 @@ Usage (once implemented):
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price
 
 
 # ── query parsing ─────────────────────────────────────────────────────────────
@@ -68,6 +68,54 @@ def _parse_query(query: str) -> dict:
     return {"description": description, "size": size, "max_price": max_price}
 
 
+# ── retry-with-fallback search (stretch feature) ───────────────────────────────
+
+def _search_with_fallback(parsed: dict) -> tuple[list, str | None]:
+    """
+    Run search_listings, and if it returns nothing, automatically retry with
+    loosened constraints — first dropping the size filter, then the price limit.
+
+    Returns (results, retry_note). retry_note is None if the first (full-
+    constraint) search succeeded; otherwise it's a sentence explaining exactly
+    what was relaxed, to show the user.
+    """
+    desc = parsed["description"]
+    size = parsed["size"]
+    price = parsed["max_price"]
+
+    # Attempt 1: full constraints.
+    results = search_listings(desc, size=size, max_price=price)
+    if results:
+        return results, None
+
+    # Attempt 2: drop the size filter.
+    if size is not None:
+        results = search_listings(desc, size=None, max_price=price)
+        if results:
+            note = (
+                f"No \"{desc}\" in size {size} — I dropped the size filter and "
+                f"found these instead."
+            )
+            return results, note
+
+    # Attempt 3: drop the price limit (and size, if any).
+    if price is not None:
+        results = search_listings(desc, size=None, max_price=None)
+        if results:
+            relaxed = "price limit"
+            if size is not None:
+                relaxed = "size and price filters"
+            note = (
+                f"No \"{desc}\" under ${price:.0f}"
+                + (f" in size {size}" if size else "")
+                + f" — I loosened the {relaxed} and found these instead."
+            )
+            return results, note
+
+    # Nothing worked even after loosening.
+    return [], None
+
+
 # ── session state ─────────────────────────────────────────────────────────────
 
 def _new_session(query: str, wardrobe: dict) -> dict:
@@ -86,6 +134,8 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "search_results": [],        # list of matching listing dicts
         "selected_item": None,       # top result, passed into suggest_outfit
         "wardrobe": wardrobe,        # user's wardrobe dict
+        "price_assessment": None,    # string from compare_price (stretch tool)
+        "retry_note": None,          # set when fallback loosened the search (stretch)
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
@@ -146,11 +196,12 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     session["parsed"] = _parse_query(query)
     parsed = session["parsed"]
 
-    # Step 3: search. (Branch A — stop early if nothing matches.)
-    session["search_results"] = search_listings(
-        parsed["description"], size=parsed["size"], max_price=parsed["max_price"]
-    )
-    if not session["search_results"]:
+    # Step 3: search, with automatic retry on loosened constraints.
+    # (Branch A — stop early only if even the loosened search finds nothing.)
+    results, retry_note = _search_with_fallback(parsed)
+    session["search_results"] = results
+    session["retry_note"] = retry_note
+    if not results:
         bits = []
         if parsed["max_price"] is not None:
             bits.append(f"under ${parsed['max_price']:.0f}")
@@ -158,14 +209,14 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             bits.append(f"in size {parsed['size']}")
         constraints = (" " + " ".join(bits)) if bits else ""
         session["error"] = (
-            f"I couldn't find any \"{parsed['description']}\"{constraints} right now. "
-            "Try raising your budget, removing the size filter, or using "
-            "different keywords."
+            f"I couldn't find any \"{parsed['description']}\"{constraints}, even "
+            "after loosening the filters. Try different keywords."
         )
         return session  # do NOT call suggest_outfit / create_fit_card
 
-    # Step 4: select the top (most relevant) result.
+    # Step 4: select the top (most relevant) result, and assess its price.
     session["selected_item"] = session["search_results"][0]
+    session["price_assessment"] = compare_price(session["selected_item"])
 
     # Step 5: suggest an outfit. (Branch B — stop on LLM failure.)
     try:

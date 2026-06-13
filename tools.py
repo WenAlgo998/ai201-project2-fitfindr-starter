@@ -253,3 +253,53 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         max_tokens=200,
     )
     return response.choices[0].message.content.strip()
+
+
+# ── Stretch tool: compare_price ─────────────────────────────────────────────────
+
+def compare_price(new_item: dict) -> str:
+    """
+    Assess whether a listing is well-priced relative to comparable items in the
+    dataset. Pure Python (no LLM) — compares against other listings in the same
+    category.
+
+    Args:
+        new_item: a listing dict (the item being assessed).
+
+    Returns:
+        A one-line assessment string with reasoning, e.g.
+        "At $18, this is a great deal — comparable tops range $14–$35
+        (median ~$22, across 14 similar items)."
+        If there are no comparable listings, returns a clear message saying so.
+    """
+    listings = load_listings()
+    comps = [
+        item["price"]
+        for item in listings
+        if item["category"] == new_item["category"] and item["id"] != new_item["id"]
+    ]
+
+    if not comps:
+        return (
+            f"No comparable {new_item['category']} listings to compare against, "
+            f"so I can't assess this ${new_item['price']:.0f} price."
+        )
+
+    comps.sort()
+    n = len(comps)
+    median = comps[n // 2] if n % 2 else (comps[n // 2 - 1] + comps[n // 2]) / 2
+    price = new_item["price"]
+
+    # Verdict relative to the median of comparable items (+/- 15% band).
+    if price <= median * 0.85:
+        verdict = "a great deal"
+    elif price <= median * 1.15:
+        verdict = "fairly priced"
+    else:
+        verdict = "a bit high"
+
+    return (
+        f"At ${price:.0f}, this is {verdict} — comparable {new_item['category']} "
+        f"listings range ${comps[0]:.0f}–${comps[-1]:.0f} "
+        f"(median ~${median:.0f}, across {n} similar items)."
+    )
